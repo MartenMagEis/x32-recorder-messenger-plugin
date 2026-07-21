@@ -1,0 +1,5 @@
+{
+  "kind": "django_app",
+  "display_name": "Messenger-Versand (Signal)",
+  "description": "Verschickt Browser-Mix-MP3s ausgeschnittener Song-Clips (oder ganzer Aufnahmen) automatisch oder per Klick an Signal-Gruppen."
+}
