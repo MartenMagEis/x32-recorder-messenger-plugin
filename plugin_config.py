@@ -1,10 +1,11 @@
 """Optional web-configuration convention (see x32-recorder's plugins/PLUGIN_DEVELOPMENT.md) -
-mixes describe_model_fields() for the plain settings with three hand-written fields (list/action/
-qrcode) for the target list and the device-linking button, per PLUGIN_DEVELOPMENT.md's "Erweiterte
+mixes describe_model_fields() for the plain settings with hand-written list/action/qrcode fields
+(target list, signal-cli install/update, device-linking), per PLUGIN_DEVELOPMENT.md's "Erweiterte
 Feldtypen" section."""
 from recorder.plugin_support import describe_model_fields, model_instance_values
 
 from . import linking
+from . import signal_cli_manager
 from .models import MessengerSettings, SignalTarget
 
 FIELDS = ["enabled", "device_name", "linked"]
@@ -20,6 +21,22 @@ TARGET_ITEM_FIELDS = [
 
 def get_config_schema():
     fields = describe_model_fields(MessengerSettings, FIELDS, READONLY_FIELDS)
+    fields.append({
+        "name": "signal_cli_installed_version", "label": "signal-cli Version", "type": "string",
+        "readonly": True, "help_text": ""
+    })
+    fields.append({
+        "name": "signal_cli_latest_version", "label": "Neueste verfügbare Version", "type": "string",
+        "readonly": True, "help_text": ""
+    })
+    fields.append({
+        "name": "check_signal_cli_update", "label": "Nach Update suchen", "type": "action", "help_text": ""
+    })
+    fields.append({
+        "name": "install_signal_cli", "label": "signal-cli installieren/aktualisieren", "type": "action",
+        "help_text": "Lädt die neueste Version von GitHub (AsamK/signal-cli) herunter. Eine "
+                     "Java-Laufzeitumgebung (JRE) muss weiterhin separat installiert sein.",
+    })
     fields.append({
         "name": "targets", "label": "Ziel-Gruppen", "type": "list", "help_text":
             "Signal-Gruppen-ID über 'Gruppen laden' (nach dem Verknüpfen) ermitteln oder von Hand eintragen.",
@@ -54,6 +71,9 @@ def _targets_as_dicts():
 
 def get_config_values():
     values = model_instance_values(MessengerSettings.get_solo(), FIELDS)
+    values["signal_cli_installed_version"] = signal_cli_manager.installed_version() or "nicht installiert"
+    last_check = signal_cli_manager.get_last_check()
+    values["signal_cli_latest_version"] = last_check["latest_version"] or last_check["error"] or "noch nicht geprüft"
     values["targets"] = _targets_as_dicts()
     link_state = linking.get_state()
     values["link_status"] = link_state["status"]
@@ -96,7 +116,12 @@ def update_config_values(data):
 
 
 def handle_config_action(action_name, data):
-    if action_name != "link":
+    if action_name == "link":
+        settings = MessengerSettings.get_solo()
+        linking.start_linking(settings.device_name)
+    elif action_name == "check_signal_cli_update":
+        signal_cli_manager.refresh_latest_version()
+    elif action_name == "install_signal_cli":
+        signal_cli_manager.install_latest()
+    else:
         raise ValueError("Diese Aktion gibt es nicht")
-    settings = MessengerSettings.get_solo()
-    linking.start_linking(settings.device_name)

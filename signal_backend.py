@@ -15,6 +15,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from . import signal_cli_manager
+
 SIGNAL_CLI_DATA_DIR = Path(__file__).resolve().parent / "signal-cli-data"
 SEND_TIMEOUT_S = 30
 LIST_GROUPS_TIMEOUT_S = 15
@@ -22,11 +24,16 @@ LIST_GROUPS_TIMEOUT_S = 15
 
 def _run(args, timeout, global_args=()):
     SIGNAL_CLI_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    cmd = ["signal-cli", "--config", str(SIGNAL_CLI_DATA_DIR), *global_args, *args]
+    cmd = [signal_cli_manager.resolve_signal_cli_command(), "--config", str(SIGNAL_CLI_DATA_DIR), *global_args, *args]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
-        raise RuntimeError("signal-cli ist nicht installiert oder nicht im PATH")
+        raise RuntimeError(
+            "signal-cli wurde nicht gefunden - über die Plugin-Konfiguration herunterladen "
+            "('signal-cli installieren/aktualisieren') oder manuell installieren und im PATH "
+            "verfügbar machen. Ein Java-Laufzeitumgebung (JRE) muss in beiden Fällen separat "
+            "installiert sein."
+        )
     if result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(f"signal-cli fehlgeschlagen: {message[-2000:]}")

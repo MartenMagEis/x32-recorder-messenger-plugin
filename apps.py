@@ -16,4 +16,6 @@ class MessengerPluginConfig(AppConfig):
         if not should_start_background_work():
             return
         from .auto_send import run_auto_send_poller
+        from .signal_cli_manager import run_update_check_poller
         threading.Thread(target=run_auto_send_poller, daemon=True).start()
+        threading.Thread(target=run_update_check_poller, daemon=True).start()

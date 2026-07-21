@@ -14,6 +14,7 @@ import qrcode
 import qrcode.image.svg
 
 from .signal_backend import SIGNAL_CLI_DATA_DIR
+from . import signal_cli_manager
 
 LINK_TIMEOUT_S = 300  # how long we wait for the user to actually scan the QR
 _URI_RE = re.compile(r"(sgnl://linkdevice\?\S+)")
@@ -51,7 +52,8 @@ def _run_link(device_name):
     proc = None
     try:
         proc = subprocess.Popen(
-            ["signal-cli", "--config", str(SIGNAL_CLI_DATA_DIR), "link", "-n", device_name],
+            [signal_cli_manager.resolve_signal_cli_command(), "--config", str(SIGNAL_CLI_DATA_DIR),
+             "link", "-n", device_name],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         for line in proc.stdout:
@@ -66,7 +68,10 @@ def _run_link(device_name):
         else:
             _set_state(status="failed", qr_svg=None, error="Verknüpfung fehlgeschlagen oder abgelaufen")
     except FileNotFoundError:
-        _set_state(status="failed", qr_svg=None, error="signal-cli ist nicht installiert oder nicht im PATH")
+        _set_state(
+            status="failed", qr_svg=None,
+            error="signal-cli wurde nicht gefunden - siehe 'signal-cli installieren/aktualisieren' oben"
+        )
     except subprocess.TimeoutExpired:
         if proc:
             proc.kill()

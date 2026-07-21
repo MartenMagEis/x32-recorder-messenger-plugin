@@ -8,14 +8,15 @@ direkt nach dem Schneiden.
 Nutzt [signal-cli](https://github.com/AsamK/signal-cli) über das eigene Signal-Konto, als Zweitgerät
 verknüpft (QR-Code-Scan wie bei Signal Desktop) - keine eigene Telefonnummer nötig.
 
-## Voraussetzung: signal-cli
+## Voraussetzung: eine Java-Laufzeitumgebung (JRE)
 
-Java-basiert, braucht ein JRE. Installation z.B. über die
-[signal-cli-Releases](https://github.com/AsamK/signal-cli/releases) oder den jeweiligen
-Paketmanager (auf einem Raspberry Pi z.B. `sudo apt install default-jre` + manuelles Entpacken
-des Release-Archivs nach `/opt/signal-cli`, dann `signal-cli` im `PATH` verfügbar machen). Dieses
-Plugin ruft `signal-cli` ausschließlich als Kommandozeilen-Tool auf, kein Python-Wrapper-Paket
-nötig.
+[signal-cli](https://github.com/AsamK/signal-cli) selbst lädt und aktualisiert dieses Plugin
+automatisch von GitHub (siehe Einrichtung unten) - lediglich das Java-Laufzeitumgebung dafür
+bleibt eine manuelle, einmalige Voraussetzung (Größe/Plattformabhängigkeit macht ein automatisches
+Mitliefern unpraktikabel). Auf einem Raspberry Pi z.B.:
+```
+sudo apt install default-jre
+```
 
 ## Installation
 
@@ -31,19 +32,24 @@ nötig.
 ## Einrichtung (alles über die x32-recorder Settings-Seite)
 
 1. Plugin-Karte → "Konfigurieren" öffnen.
-2. "Signal verknüpfen" klicken - ein QR-Code erscheint.
-3. Mit der Signal-App auf dem Handy scannen: Einstellungen → Verknüpfte Geräte → Gerät
+2. "signal-cli installieren/aktualisieren" klicken - lädt die neueste Version von GitHub
+   herunter und entpackt sie in den Plugin-Ordner (`signal-cli-bin/current/`). Ein periodischer
+   Hintergrund-Check zeigt danach automatisch an, wenn eine neuere Version verfügbar ist (wendet
+   sie aber nie von selbst an - "Neueste verfügbare Version" vs. "signal-cli Version" vergleichen
+   und bei Bedarf erneut klicken).
+3. "Signal verknüpfen" klicken - ein QR-Code erscheint.
+4. Mit der Signal-App auf dem Handy scannen: Einstellungen → Verknüpfte Geräte → Gerät
    verknüpfen. Der QR-Code ist nur für diesen einen Verknüpfungsvorgang gültig und verschwindet
    danach wieder aus der Oberfläche (siehe Geheimdaten-Hinweis unten).
-4. Nach erfolgreicher Verknüpfung: mindestens eine Ziel-Gruppe eintragen (Name + Signal-Gruppen-ID)
+5. Nach erfolgreicher Verknüpfung: mindestens eine Ziel-Gruppe eintragen (Name + Signal-Gruppen-ID)
    und "Aktiviert" einschalten.
-5. Optional pro Ziel "Auto-Senden nach Schnitt" aktivieren, damit frisch geschnittene Song-Clips
+6. Optional pro Ziel "Auto-Senden nach Schnitt" aktivieren, damit frisch geschnittene Song-Clips
    automatisch dorthin gehen, sobald ihr Browser-Mix fertig ist.
-6. "Aktiviert" (oben, Plugin-weit) einschalten - erst dann sendet das Plugin überhaupt etwas.
+7. "Aktiviert" (oben, Plugin-weit) einschalten - erst dann sendet das Plugin überhaupt etwas.
 
-Solange keine Signal-Gruppen-ID bekannt ist: `signal-cli --config
-plugins/x32_recorder_messenger_plugin/signal-cli-data listGroups -o json` auf der Maschine
-ausführen, auf der x32-recorder läuft, um die IDs der eigenen Gruppen zu sehen.
+Solange keine Signal-Gruppen-ID bekannt ist: `plugins/x32_recorder_messenger_plugin/signal-cli-bin/current/bin/signal-cli
+--config plugins/x32_recorder_messenger_plugin/signal-cli-data listGroups -o json` auf der
+Maschine ausführen, auf der x32-recorder läuft, um die IDs der eigenen Gruppen zu sehen.
 
 ## Geheimdaten
 
