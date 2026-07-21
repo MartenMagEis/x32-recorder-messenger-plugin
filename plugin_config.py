@@ -27,15 +27,19 @@ def get_config_schema():
     })
     fields.append({
         "name": "signal_cli_latest_version", "label": "Neueste verfügbare Version", "type": "string",
-        "readonly": True, "help_text": ""
+        "readonly": True, "help_text":
+            "Kann neuer sein als die installierte Version, wenn diese eine neuere "
+            "Java-Laufzeitumgebung braucht, als hier verfügbar ist - 'installieren/aktualisieren' "
+            "installiert dann automatisch die neueste noch kompatible Version."
     })
     fields.append({
         "name": "check_signal_cli_update", "label": "Nach Update suchen", "type": "action", "help_text": ""
     })
     fields.append({
         "name": "install_signal_cli", "label": "signal-cli installieren/aktualisieren", "type": "action",
-        "help_text": "Lädt die neueste Version von GitHub (AsamK/signal-cli) herunter. Eine "
-                     "Java-Laufzeitumgebung (JRE) muss weiterhin separat installiert sein.",
+        "help_text": "Lädt die neueste, mit der installierten Java-Laufzeitumgebung (JRE) "
+                     "kompatible Version von GitHub (AsamK/signal-cli) herunter. Eine JRE muss "
+                     "weiterhin separat installiert sein.",
     })
     fields.append({
         "name": "targets", "label": "Ziel-Gruppen", "type": "list", "help_text":

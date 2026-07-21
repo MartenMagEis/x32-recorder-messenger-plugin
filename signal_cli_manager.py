@@ -8,10 +8,19 @@ What this can and can't bundle: signal-cli's standard release is a Java applicat
 signal-cli` shell script + JARs) - downloading and extracting it is exactly what this module does,
 but the Java runtime (JRE) itself is a large, platform-specific dependency this deliberately does
 NOT try to auto-install. See the plugin's README for the one-time `apt install default-jre`
-(or equivalent) step that's still required."""
+(or equivalent) step that's still required.
+
+Java-compatibility fallback: signal-cli releases occasionally bump their minimum Java version (e.g.
+v0.14.0 started requiring Java 25, while v0.13.24 only needs Java 21 - discovered when installing
+0.14.6 on a Pi with the then-current `default-jre` package: it downloaded fine but failed at
+startup with UnsupportedClassVersionError). Rather than hardcoding a known-good version (which
+would go stale the next time upstream bumps the requirement again), install_latest() actually runs
+each candidate with --version and walks backwards through recent releases until one works - self-
+healing without needing to know Java version numbers itself."""
 import json
 import logging
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -25,13 +34,20 @@ BIN_DIR = Path(__file__).resolve().parent / "signal-cli-bin"
 CURRENT_DIR = BIN_DIR / "current"
 VERSION_FILE = BIN_DIR / "VERSION"
 
-RELEASES_API_URL = "https://api.github.com/repos/AsamK/signal-cli/releases/latest"
+RELEASES_API_URL = "https://api.github.com/repos/AsamK/signal-cli/releases"
+LATEST_RELEASE_API_URL = RELEASES_API_URL + "/latest"
 REQUEST_HEADERS = {
     "Accept": "application/vnd.github+json",
     "User-Agent": "x32-recorder-messenger-plugin",
 }
 API_TIMEOUT_S = 15
 DOWNLOAD_TIMEOUT_S = 120
+VERIFY_TIMEOUT_S = 20
+# How many releases (newest-first) install_latest() is willing to try before giving up. Not just
+# "a handful" - discovered live that a single Java-requirement bump (v0.14.0) stayed in place for
+# 8 consecutive releases before the next one (v0.13.24 was the last one before it, i.e. the 9th
+# release back) - too small a value here means silently never reaching a working version at all.
+MAX_COMPAT_ATTEMPTS = 15
 
 # Release cadence is slow (a handful of releases a year) - no need to hammer the (unauthenticated,
 # 60 requests/hour) GitHub API more than a few times a day. Same trade-off x32-recorder's own
@@ -57,29 +73,51 @@ def resolve_signal_cli_command():
     return "signal-cli"
 
 
+def _release_asset(release):
+    """(version, download_url) for a release's plain cross-platform .tar.gz asset, or None if this
+    release doesn't have one. Releases also ship "-json-schemas"/"-Linux-client"/"-Linux-native"
+    variants and .asc signature files alongside it - match the plain one exactly rather than the
+    first *.tar.gz found."""
+    tag = release.get("tag_name", "")
+    version = tag[1:] if tag.startswith("v") else tag
+    if not version:
+        return None
+    expected_name = f"signal-cli-{version}.tar.gz"
+    asset = next(
+        (a for a in release.get("assets", []) if a["name"] == expected_name),
+        None
+    )
+    if not asset:
+        return None
+    return version, asset["browser_download_url"]
+
+
 def _fetch_latest_release():
-    """Returns (version, download_url) for the plain cross-platform .tar.gz asset - raises
-    RuntimeError with a user-facing message on any failure."""
-    request = urllib.request.Request(RELEASES_API_URL, headers=REQUEST_HEADERS)
+    """Just the newest release's version+url - used for the informational "latest available"
+    display (refresh_latest_version). Not necessarily what install_latest() actually ends up
+    installing, see its docstring."""
+    request = urllib.request.Request(LATEST_RELEASE_API_URL, headers=REQUEST_HEADERS)
     try:
         with urllib.request.urlopen(request, timeout=API_TIMEOUT_S) as response:
             data = json.load(response)
     except (OSError, ValueError) as e:
         raise RuntimeError(f"signal-cli-Release-Info konnte nicht geladen werden: {e}")
-
-    tag = data.get("tag_name", "")
-    version = tag[1:] if tag.startswith("v") else tag
-    # Releases also ship "-json-schemas"/"-Linux-client"/"-Linux-native" variants and .asc
-    # signature files alongside the plain cross-platform build - match that one exactly rather
-    # than the first *.tar.gz found.
-    expected_name = f"signal-cli-{version}.tar.gz"
-    asset = next(
-        (a for a in data.get("assets", []) if a["name"] == expected_name),
-        None
-    )
-    if not version or not asset:
+    result = _release_asset(data)
+    if not result:
         raise RuntimeError("Kein passendes signal-cli-Release-Archiv gefunden")
-    return version, asset["browser_download_url"]
+    return result
+
+
+def _fetch_recent_releases(count):
+    """Newest-first (version, url) list - used by install_latest() to walk backwards for a
+    Java-compatible build."""
+    request = urllib.request.Request(f"{RELEASES_API_URL}?per_page={count}", headers=REQUEST_HEADERS)
+    try:
+        with urllib.request.urlopen(request, timeout=API_TIMEOUT_S) as response:
+            releases = json.load(response)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"signal-cli-Release-Liste konnte nicht geladen werden: {e}")
+    return [r for r in (_release_asset(release) for release in releases) if r]
 
 
 def get_last_check():
@@ -99,41 +137,83 @@ def refresh_latest_version():
     return get_last_check()
 
 
-def install_latest():
-    """Downloads + extracts the latest release, replacing any previously installed one. Blocks for
-    the duration of the download (a few seconds to under a minute on a Pi's connection) - same
-    trade-off as the already-synchronous git-clone-on-plugin-add core endpoint."""
-    version, url = _fetch_latest_release()
-    BIN_DIR.mkdir(parents=True, exist_ok=True)
-
+def _download_and_extract(url, dest_dir):
+    """Downloads+extracts into dest_dir/candidate (overwriting any previous candidate), returns
+    that path."""
     with tempfile.TemporaryDirectory() as tmp:
         archive_path = Path(tmp) / "signal-cli.tar.gz"
         request = urllib.request.Request(url, headers=REQUEST_HEADERS)
-        try:
-            with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_S) as response, \
-                    open(archive_path, "wb") as out_file:
-                shutil.copyfileobj(response, out_file)
-            extract_dir = Path(tmp) / "extracted"
-            with tarfile.open(archive_path) as tar:
-                tar.extractall(extract_dir)
-        except (OSError, tarfile.TarError) as e:
-            raise RuntimeError(f"signal-cli-Download/Entpacken fehlgeschlagen: {e}")
+        with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_S) as response, \
+                open(archive_path, "wb") as out_file:
+            shutil.copyfileobj(response, out_file)
+        extract_dir = Path(tmp) / "extracted"
+        with tarfile.open(archive_path) as tar:
+            tar.extractall(extract_dir)
 
         top_level_dirs = [p for p in extract_dir.iterdir() if p.is_dir()]
         if len(top_level_dirs) != 1:
             raise RuntimeError("Unerwarteter Aufbau des signal-cli-Release-Archivs")
 
-        if CURRENT_DIR.exists():
-            shutil.rmtree(CURRENT_DIR)
-        shutil.move(str(top_level_dirs[0]), str(CURRENT_DIR))
+        candidate_dir = dest_dir / "candidate"
+        if candidate_dir.exists():
+            shutil.rmtree(candidate_dir)
+        shutil.move(str(top_level_dirs[0]), str(candidate_dir))
+        return candidate_dir
 
-    bin_path = CURRENT_DIR / "bin" / "signal-cli"
-    if bin_path.exists():
-        bin_path.chmod(0o755)  # tarball permissions aren't always preserved consistently
-    VERSION_FILE.write_text(version, encoding="utf-8")
-    with _state_lock:
-        _last_check.update(latest_version=version, error=None)
-    return version
+
+def _verify_runs(bin_path):
+    """True if this signal-cli build actually starts under the locally available Java - this is
+    how a Java-version mismatch (see module docstring) gets detected, without this module needing
+    to know Java version numbers itself."""
+    try:
+        result = subprocess.run(
+            [str(bin_path), "--version"], capture_output=True, text=True, timeout=VERIFY_TIMEOUT_S
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def install_latest():
+    """Downloads the newest signal-cli release, verifies it actually runs under the locally
+    installed Java, and falls back to the next-older release(s) if not (see module docstring) -
+    the installed version can end up older than signal_cli_latest_version's "newest available" if
+    the newest one needs a JRE upgrade the caller hasn't done yet. Blocks for the duration of the
+    download(s) - same trade-off as the already-synchronous git-clone-on-plugin-add core endpoint.
+    Raises RuntimeError if none of the last MAX_COMPAT_ATTEMPTS releases run at all."""
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    releases = _fetch_recent_releases(MAX_COMPAT_ATTEMPTS)
+    if not releases:
+        raise RuntimeError("Keine passenden signal-cli-Releases gefunden")
+
+    last_error = None
+    for version, url in releases:
+        try:
+            candidate_dir = _download_and_extract(url, BIN_DIR)
+        except (OSError, tarfile.TarError, RuntimeError) as e:
+            last_error = str(e)
+            continue
+
+        bin_path = candidate_dir / "bin" / "signal-cli"
+        if bin_path.exists():
+            bin_path.chmod(0o755)  # tarball permissions aren't always preserved consistently
+
+        if _verify_runs(bin_path):
+            if CURRENT_DIR.exists():
+                shutil.rmtree(CURRENT_DIR)
+            shutil.move(str(candidate_dir), str(CURRENT_DIR))
+            VERSION_FILE.write_text(version, encoding="utf-8")
+            with _state_lock:
+                _last_check.update(latest_version=releases[0][0], error=None)
+            return version
+
+        shutil.rmtree(candidate_dir, ignore_errors=True)
+        last_error = f"Version {version} startet nicht mit der installierten Java-Laufzeitumgebung"
+
+    raise RuntimeError(
+        f"Keine der letzten {len(releases)} signal-cli-Versionen läuft mit der installierten "
+        f"Java-Laufzeitumgebung - bitte Java aktualisieren. Letzter Fehler: {last_error}"
+    )
 
 
 def run_update_check_poller():
