@@ -1,0 +1,102 @@
+"""Optional web-configuration convention (see x32-recorder's plugins/PLUGIN_DEVELOPMENT.md) -
+mixes describe_model_fields() for the plain settings with three hand-written fields (list/action/
+qrcode) for the target list and the device-linking button, per PLUGIN_DEVELOPMENT.md's "Erweiterte
+Feldtypen" section."""
+from recorder.plugin_support import describe_model_fields, model_instance_values
+
+from . import linking
+from .models import MessengerSettings, SignalTarget
+
+FIELDS = ["enabled", "device_name", "linked"]
+READONLY_FIELDS = {"linked"}
+
+TARGET_ITEM_FIELDS = [
+    {"name": "name", "label": "Name", "type": "string"},
+    {"name": "group_id", "label": "Signal-Gruppen-ID", "type": "string"},
+    {"name": "enabled", "label": "Aktiv", "type": "bool"},
+    {"name": "auto_send_on_clip_export", "label": "Auto-Senden nach Schnitt", "type": "bool"},
+]
+
+
+def get_config_schema():
+    fields = describe_model_fields(MessengerSettings, FIELDS, READONLY_FIELDS)
+    fields.append({
+        "name": "targets", "label": "Ziel-Gruppen", "type": "list", "help_text":
+            "Signal-Gruppen-ID über 'Gruppen laden' (nach dem Verknüpfen) ermitteln oder von Hand eintragen.",
+        "item_fields": TARGET_ITEM_FIELDS,
+    })
+    fields.append({
+        "name": "link", "label": "Signal verknüpfen", "type": "action",
+        "help_text": "Startet die Geräte-Verknüpfung - danach unten den QR-Code mit der Signal-App scannen "
+                     "(Einstellungen -> Verknüpfte Geräte -> Gerät verknüpfen).",
+    })
+    fields.append({
+        "name": "link_status", "label": "Verknüpfungsstatus", "type": "string", "readonly": True, "help_text": ""
+    })
+    fields.append({
+        "name": "link_qr_svg", "label": "QR-Code", "type": "qrcode", "help_text": ""
+    })
+    return {"fields": fields}
+
+
+def _targets_as_dicts():
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "group_id": t.group_id,
+            "enabled": t.enabled,
+            "auto_send_on_clip_export": t.auto_send_on_clip_export,
+        }
+        for t in SignalTarget.objects.all()
+    ]
+
+
+def get_config_values():
+    values = model_instance_values(MessengerSettings.get_solo(), FIELDS)
+    values["targets"] = _targets_as_dicts()
+    link_state = linking.get_state()
+    values["link_status"] = link_state["status"]
+    values["link_qr_svg"] = link_state["qr_svg"] if link_state["status"] == "waiting_scan" else None
+    return values
+
+
+def _save_targets(rows):
+    """Diffs the submitted rows against the DB: rows with an id are updated, rows without one are
+    created, and any existing row not present in the submission is deleted - the frontend always
+    submits the complete list (see SettingsPage.vue's 'list' field type)."""
+    seen_ids = set()
+    for row in rows or []:
+        defaults = {
+            "name": row.get("name", ""),
+            "group_id": row.get("group_id", ""),
+            "enabled": bool(row.get("enabled")),
+            "auto_send_on_clip_export": bool(row.get("auto_send_on_clip_export")),
+        }
+        target_id = row.get("id")
+        if target_id:
+            SignalTarget.objects.filter(id=target_id).update(**defaults)
+            seen_ids.add(target_id)
+        else:
+            target = SignalTarget.objects.create(**defaults)
+            seen_ids.add(target.id)
+    SignalTarget.objects.exclude(id__in=seen_ids).delete()
+
+
+def update_config_values(data):
+    settings = MessengerSettings.get_solo()
+    for key, value in data.items():
+        if key in FIELDS and key not in READONLY_FIELDS:
+            setattr(settings, key, value)
+    settings.full_clean(exclude=list(READONLY_FIELDS))
+    settings.save()
+    if "targets" in data:
+        _save_targets(data["targets"])
+    return get_config_values()
+
+
+def handle_config_action(action_name, data):
+    if action_name != "link":
+        raise ValueError("Diese Aktion gibt es nicht")
+    settings = MessengerSettings.get_solo()
+    linking.start_linking(settings.device_name)

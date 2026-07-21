@@ -1,0 +1,2 @@
+# uv pip install -r plugins/x32_recorder_messenger_plugin/requirements.txt
+qrcode>=7.4
