@@ -16,9 +16,19 @@ v0.14.0 started requiring Java 25, while v0.13.24 only needs Java 21 - discovere
 startup with UnsupportedClassVersionError). Rather than hardcoding a known-good version (which
 would go stale the next time upstream bumps the requirement again), install_latest() actually runs
 each candidate with --version and walks backwards through recent releases until one works - self-
-healing without needing to know Java version numbers itself."""
+healing without needing to know Java version numbers itself.
+
+Linux ARM64 (Raspberry Pi) native-library patch: signal-cli's bundled libsignal-client-*.jar only
+ships native libsignal_jni builds for amd64 Linux/Windows and macOS (both arches) - never aarch64
+Linux, i.e. every 64-bit Raspberry Pi OS install. Confirmed by inspecting the jar directly, and a
+well-known issue in signal-cli's own tracker (AsamK/signal-cli#1106) with an established community
+fix: download a matching prebuilt native library from exquo/signal-libs-build and swap it into the
+jar. install_latest() applies this automatically and unconditionally on Linux aarch64 - unlike the
+Java-version fallback above, this isn't a "try until one works" situation, every official release
+needs it on this platform."""
 import json
 import logging
+import platform
 import shutil
 import subprocess
 import tarfile
@@ -26,6 +36,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import zipfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -43,6 +54,8 @@ REQUEST_HEADERS = {
 API_TIMEOUT_S = 15
 DOWNLOAD_TIMEOUT_S = 120
 VERIFY_TIMEOUT_S = 20
+
+NATIVE_LIB_RELEASES_API_URL = "https://api.github.com/repos/exquo/signal-libs-build/releases/tags/libsignal_v{version}"
 # How many releases (newest-first) install_latest() is willing to try before giving up. Not just
 # "a handful" - discovered live that a single Java-requirement bump (v0.14.0) stayed in place for
 # 8 consecutive releases before the next one (v0.13.24 was the last one before it, i.e. the 9th
@@ -161,6 +174,74 @@ def _download_and_extract(url, dest_dir):
         return candidate_dir
 
 
+def _is_linux_aarch64():
+    return platform.system() == "Linux" and platform.machine() in ("aarch64", "arm64")
+
+
+def _find_bundled_libsignal_client_jar(candidate_dir):
+    """(jar_path, version) for the libsignal-client-*.jar bundled in this signal-cli build - the
+    native-library patch below needs to match this exact version, not signal-cli's own version."""
+    matches = list((candidate_dir / "lib").glob("libsignal-client-*.jar"))
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"libsignal-client-*.jar nicht eindeutig gefunden ({len(matches)} Treffer statt 1)"
+        )
+    jar_path = matches[0]
+    version = jar_path.stem[len("libsignal-client-"):]
+    return jar_path, version
+
+
+def _patch_native_library_for_linux_aarch64(candidate_dir):
+    """Swaps signal-cli's bundled libsignal-client jar's native library for a prebuilt aarch64
+    Linux one from exquo/signal-libs-build (see module docstring) - raises RuntimeError if no
+    build matching the exact bundled libsignal-client version exists yet (community builds can lag
+    a new signal-cli release by a bit), letting install_latest()'s caller fall back to the
+    next-older signal-cli release instead."""
+    jar_path, version = _find_bundled_libsignal_client_jar(candidate_dir)
+
+    request = urllib.request.Request(
+        NATIVE_LIB_RELEASES_API_URL.format(version=version), headers=REQUEST_HEADERS
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=API_TIMEOUT_S) as response:
+            release = json.load(response)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(
+            f"Kein aarch64-Linux-Native-Build für libsignal-client {version} gefunden "
+            f"(exquo/signal-libs-build): {e}"
+        )
+    asset_name = f"libsignal_jni.so-v{version}-aarch64-unknown-linux-gnu.tar.gz"
+    asset = next((a for a in release.get("assets", []) if a["name"] == asset_name), None)
+    if not asset:
+        raise RuntimeError(f"Kein aarch64-Linux-Native-Build für libsignal-client {version} gefunden")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        archive_path = Path(tmp) / "libsignal_jni.tar.gz"
+        req = urllib.request.Request(asset["browser_download_url"], headers=REQUEST_HEADERS)
+        with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_S) as response, \
+                open(archive_path, "wb") as out_file:
+            shutil.copyfileobj(response, out_file)
+        extract_dir = Path(tmp) / "extracted"
+        with tarfile.open(archive_path) as tar:
+            tar.extractall(extract_dir)
+        so_path = extract_dir / "libsignal_jni.so"
+        if not so_path.exists():
+            raise RuntimeError("libsignal_jni.so nicht im heruntergeladenen Archiv gefunden")
+
+        # Rewrite the jar: drop every existing native signal_jni entry (amd64/macOS builds this
+        # platform could never use anyway) and add the aarch64 one - plain zipfile, no dependency
+        # on a shell zip/unzip binary being installed.
+        patched_path = jar_path.with_suffix(".jar.patched")
+        with zipfile.ZipFile(jar_path, "r") as src, \
+                zipfile.ZipFile(patched_path, "w", zipfile.ZIP_DEFLATED) as dst:
+            for item in src.infolist():
+                if "signal_jni" in item.filename:
+                    continue
+                dst.writestr(item, src.read(item.filename))
+            dst.write(so_path, "libsignal_jni.so")
+        patched_path.replace(jar_path)
+
+
 def _verify_runs(bin_path):
     """True if this signal-cli build actually starts under the locally available Java - this is
     how a Java-version mismatch (see module docstring) gets detected, without this module needing
@@ -197,6 +278,14 @@ def install_latest():
         bin_path = candidate_dir / "bin" / "signal-cli"
         if bin_path.exists():
             bin_path.chmod(0o755)  # tarball permissions aren't always preserved consistently
+
+        if _is_linux_aarch64():
+            try:
+                _patch_native_library_for_linux_aarch64(candidate_dir)
+            except RuntimeError as e:
+                shutil.rmtree(candidate_dir, ignore_errors=True)
+                last_error = str(e)
+                continue
 
         if _verify_runs(bin_path):
             if CURRENT_DIR.exists():
