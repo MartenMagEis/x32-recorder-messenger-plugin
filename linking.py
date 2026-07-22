@@ -56,17 +56,27 @@ def _run_link(device_name):
              "link", "-n", device_name],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
+        output_lines = []
+        found_uri = False
         for line in proc.stdout:
+            output_lines.append(line)
             match = _URI_RE.search(line)
             if match:
                 _set_state(status="waiting_scan", qr_svg=_qr_svg(match.group(1)), error=None)
+                found_uri = True
                 break
         returncode = proc.wait(timeout=LINK_TIMEOUT_S)
         if returncode == 0:
             _set_state(status="linked", qr_svg=None, error=None)
             _mark_linked()
-        else:
+        elif found_uri:
             _set_state(status="failed", qr_svg=None, error="Verknüpfung fehlgeschlagen oder abgelaufen")
+        else:
+            # Failed before ever printing the linking URI - signal-cli's own output (e.g. a
+            # missing native library, see signal_cli_manager.py's ARM64 patch) is far more useful
+            # here than a generic message.
+            detail = "".join(output_lines).strip()[-500:] or f"Exit-Code {returncode}"
+            _set_state(status="failed", qr_svg=None, error=f"signal-cli-Fehler: {detail}")
     except FileNotFoundError:
         _set_state(
             status="failed", qr_svg=None,

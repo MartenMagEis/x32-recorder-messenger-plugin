@@ -55,6 +55,10 @@ def get_config_schema():
         "name": "link_status", "label": "Verknüpfungsstatus", "type": "string", "readonly": True, "help_text": ""
     })
     fields.append({
+        "name": "link_error", "label": "Fehlermeldung", "type": "string", "readonly": True,
+        "help_text": "Nur gesetzt, wenn die letzte Verknüpfung fehlgeschlagen ist."
+    })
+    fields.append({
         "name": "link_qr_svg", "label": "QR-Code", "type": "qrcode", "help_text": ""
     })
     return {"fields": fields}
@@ -81,6 +85,7 @@ def get_config_values():
     values["targets"] = _targets_as_dicts()
     link_state = linking.get_state()
     values["link_status"] = link_state["status"]
+    values["link_error"] = link_state["error"] if link_state["status"] == "failed" else ""
     values["link_qr_svg"] = link_state["qr_svg"] if link_state["status"] == "waiting_scan" else None
     return values
 
