@@ -77,6 +77,15 @@ def installed_version():
     return None
 
 
+def is_java_available():
+    """Whether a `java` binary is on PATH at all. Checked proactively by signal_backend.py/
+    linking.py before invoking signal-cli, so a missing JRE produces one clear message immediately
+    instead of a raw shell error buried in signal-cli's own output - `java` is a step removed from
+    the process Python invokes directly (bin/signal-cli is a shell script that calls out to it),
+    so a missing JRE never raises Python's own FileNotFoundError."""
+    return shutil.which("java") is not None
+
+
 def resolve_signal_cli_command():
     """Prefers the version this module downloaded itself; falls back to a system-wide `signal-cli`
     on PATH for anyone who installed it manually instead."""

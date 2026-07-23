@@ -49,6 +49,13 @@ def _mark_linked():
 
 def _run_link(device_name):
     SIGNAL_CLI_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not signal_cli_manager.is_java_available():
+        _set_state(
+            status="failed", qr_svg=None,
+            error="Keine Java-Laufzeitumgebung (JRE) gefunden - signal-cli braucht Java, um zu "
+                  "laufen. Installieren z.B. mit 'sudo apt install default-jre'."
+        )
+        return
     proc = None
     try:
         proc = subprocess.Popen(
@@ -65,18 +72,21 @@ def _run_link(device_name):
                 _set_state(status="waiting_scan", qr_svg=_qr_svg(match.group(1)), error=None)
                 found_uri = True
                 break
+        # wait() (not a second blocking readline loop) enforces LINK_TIMEOUT_S even if signal-cli
+        # itself never times out waiting for the scan - only *after* it exits is a final
+        # non-blocking read of any output printed since the URI match (e.g. once the phone
+        # actually scans it) safe to do without risking hanging past the timeout ourselves.
         returncode = proc.wait(timeout=LINK_TIMEOUT_S)
+        remaining = proc.stdout.read()
+        if remaining:
+            output_lines.append(remaining)
         if returncode == 0:
             _set_state(status="linked", qr_svg=None, error=None)
             _mark_linked()
-        elif found_uri:
-            _set_state(status="failed", qr_svg=None, error="Verknüpfung fehlgeschlagen oder abgelaufen")
         else:
-            # Failed before ever printing the linking URI - signal-cli's own output (e.g. a
-            # missing native library, see signal_cli_manager.py's ARM64 patch) is far more useful
-            # here than a generic message.
             detail = "".join(output_lines).strip()[-500:] or f"Exit-Code {returncode}"
-            _set_state(status="failed", qr_svg=None, error=f"signal-cli-Fehler: {detail}")
+            prefix = "Verknüpfung fehlgeschlagen oder abgelaufen" if found_uri else "signal-cli-Fehler"
+            _set_state(status="failed", qr_svg=None, error=f"{prefix}: {detail}" if detail else prefix)
     except FileNotFoundError:
         _set_state(
             status="failed", qr_svg=None,

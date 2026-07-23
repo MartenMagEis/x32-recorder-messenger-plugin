@@ -24,6 +24,11 @@ LIST_GROUPS_TIMEOUT_S = 15
 
 def _run(args, timeout, global_args=()):
     SIGNAL_CLI_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not signal_cli_manager.is_java_available():
+        raise RuntimeError(
+            "Keine Java-Laufzeitumgebung (JRE) gefunden - signal-cli braucht Java, um zu laufen. "
+            "Installieren z.B. mit 'sudo apt install default-jre' (siehe Plugin-README)."
+        )
     cmd = [signal_cli_manager.resolve_signal_cli_command(), "--config", str(SIGNAL_CLI_DATA_DIR), *global_args, *args]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)

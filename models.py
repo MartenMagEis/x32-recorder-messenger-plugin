@@ -6,9 +6,11 @@ class MessengerSettings(models.Model):
     x32-recorder's Settings page (see plugin_config.py) or Django Admin."""
 
     enabled = models.BooleanField(
-        "Aktiviert",
+        "Versand aktiviert",
         default=False,
-        help_text="Solange aus, sendet dieses Plugin nichts - auch nicht automatisch nach dem Schneiden."
+        help_text="Nicht zu verwechseln mit dem 'Aktiviert' oben in der Plugin-Zeile (das lädt nur "
+                   "das Plugin) - hier: solange aus, sendet dieses Plugin nichts, auch nicht "
+                   "automatisch nach dem Schneiden, selbst wenn Ziel-Gruppen konfiguriert sind."
     )
     device_name = models.CharField(
         "Geräte-Name",
