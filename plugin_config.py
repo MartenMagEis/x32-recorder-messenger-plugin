@@ -28,18 +28,24 @@ def get_config_schema():
     fields.append({
         "name": "signal_cli_latest_version", "label": "Neueste verfügbare Version", "type": "string",
         "readonly": True, "help_text":
-            "Kann neuer sein als die installierte Version, wenn diese eine neuere "
-            "Java-Laufzeitumgebung braucht, als hier verfügbar ist - 'installieren/aktualisieren' "
-            "installiert dann automatisch die neueste noch kompatible Version."
+            "Kann neuer sein als die installierte Version, falls für diese Plattform kein "
+            "gebündeltes JRE verfügbar ist und die installierte Version deshalb älter ausfällt."
+    })
+    fields.append({
+        "name": "jre_installed_version", "label": "Gebündelte Java-Version", "type": "string",
+        "readonly": True, "help_text":
+            "Wird automatisch mit signal-cli installiert (Temurin/Adoptium) - unabhängig von einer "
+            "eventuell system-weit installierten Java-Laufzeitumgebung. '-' bedeutet: kein "
+            "Bündel für diese Plattform verfügbar, es wird stattdessen System-Java verwendet."
     })
     fields.append({
         "name": "check_signal_cli_update", "label": "Nach Update suchen", "type": "action", "help_text": ""
     })
     fields.append({
         "name": "install_signal_cli", "label": "signal-cli installieren/aktualisieren", "type": "action",
-        "help_text": "Lädt die neueste, mit der installierten Java-Laufzeitumgebung (JRE) "
-                     "kompatible Version von GitHub (AsamK/signal-cli) herunter. Eine JRE muss "
-                     "weiterhin separat installiert sein.",
+        "help_text": "Lädt die neueste signal-cli-Version von GitHub (AsamK/signal-cli) sowie eine "
+                     "passende Java-Laufzeitumgebung (Temurin/Adoptium) herunter, falls für diese "
+                     "Plattform verfügbar.",
     })
     fields.append({
         "name": "targets", "label": "Ziel-Gruppen", "type": "list", "help_text":
@@ -80,6 +86,7 @@ def _targets_as_dicts():
 def get_config_values():
     values = model_instance_values(MessengerSettings.get_solo(), FIELDS)
     values["signal_cli_installed_version"] = signal_cli_manager.installed_version() or "nicht installiert"
+    values["jre_installed_version"] = signal_cli_manager.installed_jre_version() or "-"
     last_check = signal_cli_manager.get_last_check()
     values["signal_cli_latest_version"] = last_check["latest_version"] or last_check["error"] or "noch nicht geprüft"
     values["targets"] = _targets_as_dicts()

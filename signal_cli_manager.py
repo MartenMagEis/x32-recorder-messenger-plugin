@@ -4,19 +4,17 @@ step - same "check periodically, never auto-apply without an explicit click" phi
 x32-recorder's own plugin_updates.py/app_update.py, just against GitHub Releases instead of git
 history.
 
-What this can and can't bundle: signal-cli's standard release is a Java application (a `bin/
-signal-cli` shell script + JARs) - downloading and extracting it is exactly what this module does,
-but the Java runtime (JRE) itself is a large, platform-specific dependency this deliberately does
-NOT try to auto-install. See the plugin's README for the one-time `apt install default-jre`
-(or equivalent) step that's still required.
-
-Java-compatibility fallback: signal-cli releases occasionally bump their minimum Java version (e.g.
-v0.14.0 started requiring Java 25, while v0.13.24 only needs Java 21 - discovered when installing
-0.14.6 on a Pi with the then-current `default-jre` package: it downloaded fine but failed at
-startup with UnsupportedClassVersionError). Rather than hardcoding a known-good version (which
-would go stale the next time upstream bumps the requirement again), install_latest() actually runs
-each candidate with --version and walks backwards through recent releases until one works - self-
-healing without needing to know Java version numbers itself.
+Bundled JRE: signal-cli releases occasionally bump their minimum Java version (discovered live -
+v0.14.0 started requiring Java 25, while v0.13.24 only needed Java 21). Originally this module only
+walked backwards through older signal-cli releases to find one compatible with whatever Java
+happened to already be installed (see install_latest()) - but that has a sharp edge: Signal's own
+servers can reject linking/registration from a signal-cli build old enough to be missing protocol
+capabilities they now require (a 409/MissingCapabilitiesException - see AsamK/signal-cli#1226,
+discovered live when v0.13.24 downloaded and ran fine but couldn't actually complete a device link).
+So install_latest() now tries to download a matching Temurin JRE from Adoptium
+(https://adoptium.net) into its own directory first and always prefers running the genuine latest
+signal-cli release under that - the old version-walkback logic still exists as a fallback for
+platforms Adoptium doesn't publish a JRE for, but is no longer the common path.
 
 Linux ARM64 (Raspberry Pi) native-library patch: signal-cli's bundled libsignal-client-*.jar only
 ships native libsignal_jni builds for amd64 Linux/Windows and macOS (both arches) - never aarch64
@@ -25,9 +23,15 @@ well-known issue in signal-cli's own tracker (AsamK/signal-cli#1106) with an est
 fix: download a matching prebuilt native library from exquo/signal-libs-build and swap it into the
 jar. install_latest() applies this automatically and unconditionally on Linux aarch64 - unlike the
 Java-version fallback above, this isn't a "try until one works" situation, every official release
-needs it on this platform."""
+needs it on this platform.
+
+Downloads/extracts always happen inside a temp dir anchored under BIN_DIR (this plugin's own
+folder, on the real disk) rather than Python's tempfile default (the system temp dir) - discovered
+live that /tmp is a small (454M) RAM-backed tmpfs on Raspberry Pi OS, which filled up completely
+mid-debugging from a signal-cli+JRE download and broke tar extraction outright."""
 import json
 import logging
+import os
 import platform
 import shutil
 import subprocess
@@ -44,6 +48,8 @@ logger = logging.getLogger(__name__)
 BIN_DIR = Path(__file__).resolve().parent / "signal-cli-bin"
 CURRENT_DIR = BIN_DIR / "current"
 VERSION_FILE = BIN_DIR / "VERSION"
+JRE_DIR = BIN_DIR / "jre"
+JRE_VERSION_FILE = BIN_DIR / "JRE_VERSION"
 
 RELEASES_API_URL = "https://api.github.com/repos/AsamK/signal-cli/releases"
 LATEST_RELEASE_API_URL = RELEASES_API_URL + "/latest"
@@ -56,6 +62,12 @@ DOWNLOAD_TIMEOUT_S = 120
 VERIFY_TIMEOUT_S = 20
 
 NATIVE_LIB_RELEASES_API_URL = "https://api.github.com/repos/exquo/signal-libs-build/releases/tags/libsignal_v{version}"
+# signal-cli's current minimum as of v0.14.0 (see module docstring) - bumping this is a code change,
+# not automatic, but a too-old bundled JRE just means install_latest() falls back to the
+# version-walkback path instead of failing outright.
+JRE_FEATURE_VERSION = 25
+ADOPTIUM_ASSET_API_URL = "https://api.adoptium.net/v3/assets/latest/{feature}/hotspot"
+
 # How many releases (newest-first) install_latest() is willing to try before giving up. Not just
 # "a handful" - discovered live that a single Java-requirement bump (v0.14.0) stayed in place for
 # 8 consecutive releases before the next one (v0.13.24 was the last one before it, i.e. the 9th
@@ -71,19 +83,53 @@ _state_lock = threading.Lock()
 _last_check = {"latest_version": None, "error": None}
 
 
+def _temp_dir():
+    """tempfile.TemporaryDirectory() anchored under BIN_DIR instead of the system default - see
+    module docstring for why (a full /tmp broke extraction mid-download on a live Pi)."""
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    return tempfile.TemporaryDirectory(dir=BIN_DIR)
+
+
 def installed_version():
     if VERSION_FILE.exists():
         return VERSION_FILE.read_text(encoding="utf-8").strip()
     return None
 
 
+def installed_jre_version():
+    if JRE_VERSION_FILE.exists():
+        return JRE_VERSION_FILE.read_text(encoding="utf-8").strip()
+    return None
+
+
+def resolve_java_home():
+    """Path to use as JAVA_HOME if this module's own bundled JRE was successfully installed, else
+    None (callers fall back to whatever `java`/JAVA_HOME the environment already provides)."""
+    java_bin = JRE_DIR / "bin" / "java"
+    if java_bin.exists():
+        return str(JRE_DIR)
+    return None
+
+
 def is_java_available():
-    """Whether a `java` binary is on PATH at all. Checked proactively by signal_backend.py/
-    linking.py before invoking signal-cli, so a missing JRE produces one clear message immediately
+    """Whether SOME usable Java - bundled or system - is available at all. Checked proactively by
+    signal_backend.py/linking.py before invoking signal-cli, so a genuinely missing JRE (bundling
+    failed, e.g. no network or an unsupported architecture) produces one clear message immediately
     instead of a raw shell error buried in signal-cli's own output - `java` is a step removed from
-    the process Python invokes directly (bin/signal-cli is a shell script that calls out to it),
-    so a missing JRE never raises Python's own FileNotFoundError."""
-    return shutil.which("java") is not None
+    the process Python invokes directly (bin/signal-cli is a shell script that calls out to it), so
+    a missing JRE never raises Python's own FileNotFoundError."""
+    return resolve_java_home() is not None or shutil.which("java") is not None
+
+
+def build_subprocess_env():
+    """Environment for any subprocess invocation of signal-cli - overrides JAVA_HOME to the bundled
+    JRE if one is installed, otherwise a plain copy of this process's own environment (system java
+    via PATH/JAVA_HOME, as before bundling existed)."""
+    env = dict(os.environ)
+    java_home = resolve_java_home()
+    if java_home:
+        env["JAVA_HOME"] = java_home
+    return env
 
 
 def resolve_signal_cli_command():
@@ -93,6 +139,74 @@ def resolve_signal_cli_command():
     if bin_path.exists():
         return str(bin_path)
     return "signal-cli"
+
+
+def _adoptium_arch():
+    return {"aarch64": "aarch64", "arm64": "aarch64", "x86_64": "x64", "amd64": "x64"}.get(
+        platform.machine().lower()
+    )
+
+
+def _fetch_jre_asset():
+    """(version, download_url) for the latest Temurin JRE matching this platform, or None if
+    unsupported (install_jre() treats that as non-fatal) or the API is unreachable. Linux only,
+    deliberately - x32-recorder's production target is always Linux (see CLAUDE.md), and Adoptium's
+    Linux assets are .tar.gz like everything else this module already extracts; Windows/macOS ship
+    .zip instead, which would silently fail against this module's tarfile-only extraction if ever
+    reached from the Windows dev machine."""
+    if platform.system() != "Linux":
+        return None
+    arch = _adoptium_arch()
+    if not arch:
+        return None
+    url = (
+        ADOPTIUM_ASSET_API_URL.format(feature=JRE_FEATURE_VERSION)
+        + f"?architecture={arch}&image_type=jre&os=linux"
+    )
+    request = urllib.request.Request(url, headers={**REQUEST_HEADERS, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=API_TIMEOUT_S) as response:
+            data = json.load(response)
+    except (OSError, ValueError):
+        return None
+    if not data:
+        return None
+    return data[0]["release_name"], data[0]["binary"]["package"]["link"]
+
+
+def install_jre():
+    """Downloads+extracts a Temurin JRE for this platform into JRE_DIR. Raises RuntimeError if
+    Adoptium doesn't publish one for this architecture/OS or the download fails - install_latest()
+    treats that as non-fatal and falls back to the version-walkback path against whatever Java is
+    already on the system."""
+    asset = _fetch_jre_asset()
+    if not asset:
+        raise RuntimeError("Kein passender JRE-Build für diese Plattform bei Adoptium gefunden")
+    version, url = asset
+
+    with _temp_dir() as tmp:
+        archive_path = Path(tmp) / "jre.tar.gz"
+        request = urllib.request.Request(url, headers=REQUEST_HEADERS)
+        try:
+            with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_S) as response, \
+                    open(archive_path, "wb") as out_file:
+                shutil.copyfileobj(response, out_file)
+            extract_dir = Path(tmp) / "extracted"
+            with tarfile.open(archive_path) as tar:
+                tar.extractall(extract_dir)
+        except (OSError, tarfile.TarError) as e:
+            raise RuntimeError(f"JRE-Download/Entpacken fehlgeschlagen: {e}")
+
+        top_level_dirs = [p for p in extract_dir.iterdir() if p.is_dir()]
+        if len(top_level_dirs) != 1:
+            raise RuntimeError("Unerwarteter Aufbau des JRE-Archivs")
+
+        if JRE_DIR.exists():
+            shutil.rmtree(JRE_DIR)
+        shutil.move(str(top_level_dirs[0]), str(JRE_DIR))
+
+    JRE_VERSION_FILE.write_text(version, encoding="utf-8")
+    return version
 
 
 def _release_asset(release):
@@ -162,7 +276,7 @@ def refresh_latest_version():
 def _download_and_extract(url, dest_dir):
     """Downloads+extracts into dest_dir/candidate (overwriting any previous candidate), returns
     that path."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with _temp_dir() as tmp:
         archive_path = Path(tmp) / "signal-cli.tar.gz"
         request = urllib.request.Request(url, headers=REQUEST_HEADERS)
         with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_S) as response, \
@@ -224,7 +338,7 @@ def _patch_native_library_for_linux_aarch64(candidate_dir):
     if not asset:
         raise RuntimeError(f"Kein aarch64-Linux-Native-Build für libsignal-client {version} gefunden")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with _temp_dir() as tmp:
         archive_path = Path(tmp) / "libsignal_jni.tar.gz"
         req = urllib.request.Request(asset["browser_download_url"], headers=REQUEST_HEADERS)
         with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT_S) as response, \
@@ -252,12 +366,13 @@ def _patch_native_library_for_linux_aarch64(candidate_dir):
 
 
 def _verify_runs(bin_path):
-    """True if this signal-cli build actually starts under the locally available Java - this is
-    how a Java-version mismatch (see module docstring) gets detected, without this module needing
-    to know Java version numbers itself."""
+    """True if this signal-cli build actually starts under the available Java (bundled JRE
+    preferred, see build_subprocess_env()) - this is how a Java-version mismatch (see module
+    docstring) gets detected, without this module needing to know Java version numbers itself."""
     try:
         result = subprocess.run(
-            [str(bin_path), "--version"], capture_output=True, text=True, timeout=VERIFY_TIMEOUT_S
+            [str(bin_path), "--version"], capture_output=True, text=True, timeout=VERIFY_TIMEOUT_S,
+            env=build_subprocess_env()
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -265,13 +380,19 @@ def _verify_runs(bin_path):
 
 
 def install_latest():
-    """Downloads the newest signal-cli release, verifies it actually runs under the locally
-    installed Java, and falls back to the next-older release(s) if not (see module docstring) -
-    the installed version can end up older than signal_cli_latest_version's "newest available" if
-    the newest one needs a JRE upgrade the caller hasn't done yet. Blocks for the duration of the
-    download(s) - same trade-off as the already-synchronous git-clone-on-plugin-add core endpoint.
-    Raises RuntimeError if none of the last MAX_COMPAT_ATTEMPTS releases run at all."""
+    """Ensures a bundled JRE is available (best-effort - failure here just means falling back to
+    whatever Java is already on the system, same as before bundling existed), then downloads the
+    newest signal-cli release and verifies it actually runs, falling back to the next-older
+    release(s) if not (see module docstring - with a bundled JRE this should succeed on the first/
+    newest candidate in the common case, the walkback is now mainly a safety net). Blocks for the
+    duration of the download(s) - same trade-off as the already-synchronous git-clone-on-plugin-add
+    core endpoint. Raises RuntimeError if none of the last MAX_COMPAT_ATTEMPTS releases run at all."""
     BIN_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        install_jre()
+    except RuntimeError as e:
+        logger.info(f"Messenger: kein gebündeltes JRE installiert, nutze System-Java: {e}")
+
     releases = _fetch_recent_releases(MAX_COMPAT_ATTEMPTS)
     if not releases:
         raise RuntimeError("Keine passenden signal-cli-Releases gefunden")
@@ -306,11 +427,11 @@ def install_latest():
             return version
 
         shutil.rmtree(candidate_dir, ignore_errors=True)
-        last_error = f"Version {version} startet nicht mit der installierten Java-Laufzeitumgebung"
+        last_error = f"Version {version} startet nicht mit der verfügbaren Java-Laufzeitumgebung"
 
     raise RuntimeError(
-        f"Keine der letzten {len(releases)} signal-cli-Versionen läuft mit der installierten "
-        f"Java-Laufzeitumgebung - bitte Java aktualisieren. Letzter Fehler: {last_error}"
+        f"Keine der letzten {len(releases)} signal-cli-Versionen läuft mit der verfügbaren "
+        f"Java-Laufzeitumgebung. Letzter Fehler: {last_error}"
     )
 
 

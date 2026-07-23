@@ -27,11 +27,16 @@ def _run(args, timeout, global_args=()):
     if not signal_cli_manager.is_java_available():
         raise RuntimeError(
             "Keine Java-Laufzeitumgebung (JRE) gefunden - signal-cli braucht Java, um zu laufen. "
-            "Installieren z.B. mit 'sudo apt install default-jre' (siehe Plugin-README)."
+            "'signal-cli installieren/aktualisieren' erneut ausführen (lädt normalerweise "
+            "automatisch eine passende JRE mit), oder manuell installieren, falls diese Plattform "
+            "von der automatischen JRE-Installation nicht unterstützt wird (siehe Plugin-README)."
         )
     cmd = [signal_cli_manager.resolve_signal_cli_command(), "--config", str(SIGNAL_CLI_DATA_DIR), *global_args, *args]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            env=signal_cli_manager.build_subprocess_env()
+        )
     except FileNotFoundError:
         raise RuntimeError(
             "signal-cli wurde nicht gefunden - über die Plugin-Konfiguration herunterladen "

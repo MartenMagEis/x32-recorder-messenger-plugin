@@ -53,7 +53,8 @@ def _run_link(device_name):
         _set_state(
             status="failed", qr_svg=None,
             error="Keine Java-Laufzeitumgebung (JRE) gefunden - signal-cli braucht Java, um zu "
-                  "laufen. Installieren z.B. mit 'sudo apt install default-jre'."
+                  "laufen. 'signal-cli installieren/aktualisieren' oben erneut ausführen (lädt "
+                  "normalerweise automatisch eine passende JRE mit)."
         )
         return
     proc = None
@@ -62,6 +63,7 @@ def _run_link(device_name):
             [signal_cli_manager.resolve_signal_cli_command(), "--config", str(SIGNAL_CLI_DATA_DIR),
              "link", "-n", device_name],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            env=signal_cli_manager.build_subprocess_env(),
         )
         output_lines = []
         found_uri = False
